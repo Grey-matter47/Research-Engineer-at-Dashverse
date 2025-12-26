@@ -237,7 +237,6 @@ If multiple body type candidates (curvy, slim, muscular):
 
 **Not Implemented**:
 - **Ethnicity**: ❌ Removed (unreliable from tags; requires labeled training data + CLIP fine-tuning)
-- **Scars/Tattoos**: ❌ Not extracted (requires object detection)
 
 ### 2.6 Configuration Constants
 
@@ -396,9 +395,8 @@ output_dir = '/content/drive/My Drive/wtc_output'
 ## Known Limitations & Future Work
 
 1. **Ethnicity Inference** ❌ (requires labeled dataset + CLIP fine-tuning)
-2. **Scars/Tattoos** ❌ (requires object detection)
-3. **Body Type Accuracy** ⚠️ (relies on breast/hip tags)
-4. **CLIP Latency** ⚠️ (200-500 ms; fine-tuning → 50 ms)
+2. **Body Type Accuracy** ⚠️ (relies on breast/hip tags)
+3. **CLIP Latency** ⚠️ (200-500 ms; fine-tuning → 50 ms)
 
 ---
 
