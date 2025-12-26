@@ -1,156 +1,430 @@
-# Join Dashverse Research
+# WTC (Who's That Character) - Technical Documentation
+## Character Attribute Extraction from Anime Images
 
-**Build the Future of Generative Content Creation**
+**Version**: 0.6.2 (Scaling-Ready Pipeline)  
+**Last Updated**: December 26, 2025  
+**Status**: Production Ready (v0.5.1 Demo) | Scaling Ready (v0.6.2 Pipeline)
 
-Welcome to **Dashverse** — where we don't just use generative AI, we push it to its limits.
+---
 
-We are a small, fast-moving team building powerful tools for the next generation of storytellers. Our products — like [Frameo.ai](https://frameo.ai/create) and [Dashtoon Studio](https://studio.dashtoon.ai/) — enable creators to instantly turn ideas into high-quality videos, comics, and more using AI. If you're someone who thrives on solving deep technical problems and wants to see your work used by millions, this is your playground.
+## Executive Summary
 
-## The Role: Research Engineer
+**WTC** is a two-stage, multi-model anime character attribute extraction system designed to process large-scale image datasets (5M+ images) and extract structured character attributes for training generative models. The system uses a modular architecture combining **tag-based inference** (DeepDanbooru) and **zero-shot vision-language models** (CLIP), routing to gender-specific attribute inference modules for high accuracy.
 
-This isn't your average research role.
+### Key Features
+- ✅ **Multi-model support**: DeepDanbooru (API), CLIP (local cached embeddings), or both for comparison
+- ✅ **Gender-aware routing**: Hot-swappable functions for male/female/non-binary inference
+- ✅ **Multi-modal age inference**: Clothing context + body development + facial maturity indicators
+- ✅ **Streaming pipeline**: HuggingFace dataset streaming with per-shard processing
+- ✅ **Colab-optimized**: Session timeout mitigation, cache clearing, JSONL streaming writes
+- ✅ **Error resilience**: Per-image error logging in JSONL output, no pipeline failure
+- ✅ **Production quality**: 10 of 11 attributes production-ready; skin tone & body type best-effort
 
-At Dashverse, your work directly impacts creators. You’ll get to see the delight on a user's face when a tool you've built helps them bring their imagination to life — in seconds, not hours. This is a rare opportunity to move fast and shape the future of generative media.
+### Deliverables
+- **v0.5.1**: Interactive Gradio UI for single-image demo
+- **v0.6.2**: Batch pipeline with HuggingFace dataset streaming, JSONL output, ready for 5M+ images
+- **Ray Parallelization**: Optional distributed processing (4 GPU workers → ~17 hours for 5M images)
 
-You're not here to write papers and wait six months for reviews. You're here to:
-- Prototype bleeding-edge generative models.
-- Ship tools that change how stories are made.
-- Build the infra and internal tools to move 10x faster.
+---
 
-## What We're Solving
+## Architecture Overview
 
-We’re building real tools for real creators — and that means diving deep into unsolved problems at the frontier of generative media.
+```
+INPUT (Image)
+    ↓
+STAGE 1: Tagging (DeepDanbooru or CLIP)
+    ↓ (Raw tags: {"1girl": 0.99, "blueyes": 0.92, "long hair": 0.88, ...})
+    ↓
+STAGE 2: Projector (Tags → Structured Attributes)
+    ├─ Character Count Gate (multi-char filter)
+    ├─ Gender Detection (1girl/1boy → female/male)
+    ├─ Attribute Extraction (hair, eye, body type, clothing, etc.)
+    ├─ Gender-Aware Routing (female body type ≠ male body type)
+    ├─ Multi-Modal Inference (age: tags + clothing + body development)
+    └─ Confidence Resolution (delta threshold = 0.3 to resolve ambiguity)
+    ↓
+OUTPUT (Structured JSON with confidences + evidence)
+    {
+      "age": "young adult" (0.89),
+      "gender": "female" (0.98),
+      "hairColor": "black" (0.95),
+      ...
+    }
+```
 
-### Advancing Visual Quality with Diffusion
+---
 
-Diffusion models are powerful, but raw outputs often fall short. Whether it's a single comic panel or 120 frames of an AI-generated video, visual quality matters. We're focused on pushing fidelity, coherence, and artistic control to new heights.
+## Stage 0: Dataset & Metadata Architecture
 
-**Prompt:** *"A 1950s All India Radio broadcaster reading news in Hindi at a wooden microphone, headphones on and script in hand under soft studio lights."*
+### Dataset Structure
+- **Source**: HuggingFace [cagliostrolab/860k-ordered-tags](https://huggingface.co/datasets/cagliostrolab/860k-ordered-tags)
+- **Total**: 860,000 anime character images (~120-130 shards)
+- **Shard Size**: ~10,800 MB per shard (~10,000 images)
+- **Format**: PNG/JPG images with pre-split shards in dataset
 
-<table>
-  <tr>
-    <td><img src="https://content.dashtoon.ai/user-uploaded-files/6663a422-bd14-4e69-bae2-de1860bb3cfe.png" width="512"/></td>
-    <td><img src="https://content.dashtoon.ai/user-uploaded-files/d4b62477-614a-40cc-972d-e9c7b2de6e7f.png" width="512"/></td>
-  </tr>
-  <tr>
-    <td>Flux Dev</td>
-    <td>Dashtoon Model</td>
-  </tr>
-</table>
+### Metadata Schema
+- **Index File**: `stage1_index.csv` (or `metadata_lat.json`)
+- **Per-Image Fields**:
+  - `image_id`: Unique identifier
+  - `width`, `height`: Image resolution
+  - `tags`: Pre-existing metadata tags (e.g., from Danbooru)
+  - `source`: Original dataset source
 
-### Controllability at the Core
+### Error Handling Strategy (Stage 0)
+| Error Type | Handling |
+|-----------|----------|
+| **Corrupted image** | Skip, log `"error": "Image decode failed"` in JSONL |
+| **Missing metadata** | Use `None` for width/height, `[]` for tags |
+| **Unreadable file** | Log error, continue to next image |
+| **Non-image file** | Skip (pre-filtered in shard loading) |
 
-We're developing **creative tools**, not black boxes. That means giving creators meaningful control over outputs:
-- Text + image multi-modal prompts.
-- Conditioning on pose, expression, scene layout, and panel structure.
-- Temporal control for frame-to-frame consistency in videos.
-- Spatial control for region-specific edits.
+**Implementation**: All errors logged in output JSONL with `"error"` field. Pipeline continues without failure.
 
-<table>
-  <tr>
-    <td><img src="https://content.dashtoon.ai/stability-images/df97ec54-4db6-4e22-b743-ea365532b84f.png" width="512"/></td>
-    <td><img src="https://content.dashtoon.ai/stability-images/58465a67-5712-4b3f-8abf-74019971d897.png" width="512"/></td>
-  </tr>
-  <tr>
-    <td><img src="https://content.dashtoon.ai/stability-images/78bf153a-e23f-4ef9-9231-f3d9244121c4.png" width="512"/></td>
-    <td><img src="https://content.dashtoon.ai/stability-images/91acfaec-b637-4266-9ca8-32f3c0c85216.png" width="512"/></td>
-  </tr>
-  <tr>
-    <td><img src="https://content.dashtoon.ai/stability-images/1c7ee699-2482-4362-b2f5-5acf4dd27f2a.png" width="512"/></td>
-    <td><img src="https://content.dashtoon.ai/stability-images/449e5924-2e86-43e0-b566-5618f7026363.png" width="512"/></td>
-  </tr>
-</table>
+---
 
-### Character Identity & Reusability
+## Stage 1: Tagging Model Selection & Evaluation
 
-Characters aren't just faces — they're consistent, recognizable identities. We're building:
-- ID-consistent inpainting to fix or change parts of a character without losing fidelity.
-- Low-data personalization methods (e.g., style or identity adapters).
-- Seamless multi-angle rendering of the same character across scenes or panels.
+### Model Comparison Study
 
-This enables creators to design once and reuse intelligently — with style and consistency.
+**Methodology**: 100-image test set sampled from 9 shards (3 start, 3 middle, 3 end)
 
+| Model | Strength | Weakness | Use Case |
+|-------|----------|----------|----------|
+| **DeepDanbooru** (trained) | ✓ Excellent character count, hair, clothing detail | Limited age/body type inference | Primary tagger (default) |
+| **CLIP** (zero-shot) | ✓ Strong on age, body type, expression, multi-char detection | Slower (10-15 sec/img without optimization), expensive prompts | Secondary comparator |
+| **WD-14** | ✓ Fast tagging | ✗ Too many low-confidence tags, unreliable threshold | Not used in final system |
+| **Metadata tags** | ✓ Ground truth, available | Limited coverage, sparse for some attributes | Validation only |
 
-<div style="display: flex; flex-wrap: wrap; gap: 10px; justify-content: center;">
-  <img src="https://content.dashtoon.ai/stability-images/792d76bf-11b5-44a6-81c7-b7a57b8428b2.png" width="200" style="flex: 1; min-width: 200px; max-width: 300px;"/>
-  <img src="https://content.dashtoon.ai/stability-images/b9c49616-8686-40c3-8261-17918dfd9b8e.png" width="200" style="flex: 1; min-width: 200px; max-width: 300px;"/>
-  <img src="https://content.dashtoon.ai/stability-images/4ed5168f-644b-460b-b912-5c596a9614d9.png" width="200" style="flex: 1; min-width: 200px; max-width: 300px;"/>
-  <img src="https://content.dashtoon.ai/stability-images/53d3c04e-f7cf-4a22-b3c8-aa8ca8393445.png" width="200" style="flex: 1; min-width: 200px; max-width: 300px;"/>
-  <img src="https://content.dashtoon.ai/stability-images/0b6bad0d-d3a3-43fb-b93d-b871c5c57710.png" width="200" style="flex: 1; min-width: 200px; max-width: 300px;"/>
-</div>
+### Threshold Selection
+- **Initial**: 0.5 (too strict, many low-quality images failed)
+- **Final**: **0.1–0.2** (trade-off for noisy image recovery)
+  - DeepDanbooru: 0.1 primary, 0.25 fallback for eye color
+  - CLIP: 0.15 primary threshold
 
-### Scene-Aware Object & Clothing Transfer
+### Inference Latency
+| Model | Latency | Notes |
+|-------|---------|-------|
+| DeepDanbooru API (Gradio Space) | 50–200 ms | Highly variable; rate limit 5–8 hits/sec |
+| DeepDanbooru local (if fine-tuned) | **<50 ms** | 20 images/sec potential (not implemented) |
+| CLIP (single) | 200–500 ms | Initial; optimized to ~50 ms with batch + cache |
+| CLIP (batch=16) | ~50 ms avg | 320 images/batch on V100 GPU |
 
-We're building pipelines to enable asset-level swaps (outfits, props, etc.) while preserving visual integrity and scene coherence.
+### Future Optimization: CLIP Fine-Tuning
 
-Key techniques include:
-- Semantic segmentation with feature-level transfer.
-- Training-free approaches using adapter stacking.
-- Support for both photoreal and stylized (anime, comic) domains.
+**Proposed**: Train CLIP on tags-as-image-embeddings + images
+- **Input**: Tag probability vector (high-dim) + image
+- **Output**: Structured attributes directly
+- **Benefit**: ~10× speedup, better consistency than zero-shot
 
+**Math**:
+```
+Current CLIP pipeline:
+  - Load model: 1 forward pass per attribute category
+  - Compute image features: 1× per image
+  - Compare with cached text embeddings: K comparisons (K = # categories)
+  Cost per image ≈ 200-500ms (overhead from Gradio + network latency)
 
-<table>
-  <tr>
-    <td><strong>Base Image</strong></td>
-    <td><strong>Clothing Image</strong></td>
-    <td><strong>Final Image</strong></td>
-  </tr>
-  <tr>
-    <td><img src="https://content.dashtoon.ai/stability-images/64e995b9-2215-41ff-bd67-55602fb43d0d.webp" width="300"/></td>
-    <td><img src="https://content.dashtoon.ai/user-uploaded-images/08668b84-9882-47d8-920b-0accd5dc2261.webp" width="300"/></td>
-    <td><img src="https://content.dashtoon.ai/stability-images/35933486-d611-434f-8d0f-6a493d97dd4b.webp" width="300"/></td>
-  </tr>
-</table>
+Fine-tuned CLIP:
+  - Single forward pass: image → attributes directly
+  Cost per image ≈ 50-100ms (local inference only)
 
-### Training-Free Customization & Distillation
+Speedup ≈ 5-10×
+```
 
-We're exploring fast, lightweight personalization methods that don’t require full retraining:
-- Tuning-free ID adapters and style injectors.
-- LoRA + ControlNet workflows with zero additional training.
-- Fast model distillation for mobile inference and real-time generation.
+---
 
-These innovations unlock high-speed, high-fidelity use in production creator tools.
+## Stage 2: Projector (Tags → Structured Attributes)
 
-If any of this sparks ideas, feel free to explore one of our sample problems — or fork the repo and show us what you’d build differently.
+### Architecture: Tag-to-Attribute Mapping
 
-## What You’ll Work On
+**Input**: `tag_probs: Dict[str, float]` (e.g., `{"1girl": 0.99, "blueyes": 0.92, ...}`)  
+**Output**: `attributes: Dict[str, Any]` (structured JSON with confidences + evidence)
 
-Here are a few recent open-source drops from our team:
-- [Keyframe LoRA: Video generation using only keyframes](https://insiders.dashtoon.com/introducing-hunyuan-keyframe-lora-open-source-keyframe-based-video-generation/)
-- [Tuning-free ID-consistent inpainting](https://insiders.dashtoon.com/a-road-towards-tuning-free-id-consistent-character-inpainting/)
-- [DashTailor: Object transfer for AI-generated comics](https://insiders.dashtoon.com/dashtailor-training-free-clothing-and-object-transfer-for-ai-comics/)
-- [Adversarial Diffusion Distillation](https://insiders.dashtoon.com/exploring-the-future-of-comic-generation-insights-from-our-adversarial-diffusion-distillation-poc/)
-- [DashAnimeXL: Stylized diffusion for comic-style animations](https://insiders.dashtoon.com/dashanimexl/)
+### 2.1 Multi-Character Gating (First Pass)
 
-## Who We’re Looking For
+```python
+estimateCharacterCount(tags) → (count: int, is_ambiguous: bool)
 
-We don’t care about your resume or degree. We care about what you’ve built, trained, or broken and fixed.
+1. Check "solo" tag → (1, False)
+2. Regex extract count from "Ngirl", "Nboy" → (N, is_multi_keyword)
+3. Check multi_keywords ["multiple", "group", "couple", ...] → (2, True)
+4. Default (no 1girl/1boy found) → (2, ambiguous=True)
 
-You might be a good fit if you:
-- Have trained or fine-tuned models like Stable Diffusion, AnimateDiff, or StyleGAN.
-- Are comfortable with PyTorch, LoRA, ControlNet, DreamBooth, or IP-Adapters.
-- Can manage multi-GPU training jobs, optimize inference, and debug issues fast.
-- Prefer to move quickly and own the entire stack from training to UI.
+If count ≠ 1:
+  Return {"imagestatus": "ambiguousmulticharacter", "charactercount": count, "attributes": None}
+  (Skip full attribute extraction)
+```
 
-Bonus if you:
-- Have written clean infra or tooling that helped teams scale.
-- Have contributed to open-source or built an impressive side project.
-- Have a strong perspective on how generative models should evolve.
+**Character Count Regex**: `r'(\d+)(girl|girls|boy|boys)'` (case-insensitive)
 
-## Perks
+### 2.2 Gender Detection (Router)
 
-- Dedicated compute access with high-end GPUs.
-- Fixed-band compensation based on submission quality.
-- End-to-end ownership: from research to production to user experience.
+```python
+gender = extract_attribute(tag_probs, {"1girl", "1boy"})
+  → female (if "1girl")
+  → male (if "1boy")
+  → unknown (default)
 
-## How to Apply
+Used to ROUTE subsequent inference:
+  ├─ Female → inferFemaleBodyType() [breast size + hip size + proportions]
+  ├─ Male   → inferMaleBodyType() [muscle tags + facial hair + build]
+  └─ Gender-aware age inference
+```
 
-- Clone this repo.
-- Attempt one of the sample problems — or fork it and show us something better.
-- Email your submission or proposal to: **soumyadeep [at] dashtoon.com**
+### 2.3 Gender-Aware Body Type Inference
 
-No Leetcode. Just real problems and real builders.
+**Female Body Type** (from breast size + hip size + proportions):
 
-If you're the kind of person who wants to own the full stack — from fine-tuning to infra to user-facing tools — come build with us.
+| Breast Size Tag | Weight Mapping |
+|-----------------|---|
+| `flatchest` | slim (0.8), petite (0.6) |
+| `smallbreasts` | slim (0.5), petite (0.4) |
+| `mediumbreasts` | slim (0.3), average (0.5) |
+| `largebreasts` | curvy (0.6), voluptuous (0.4) |
+| `hugebreasts` | voluptuous (0.8), curvy (0.5) |
+| `giganticbreasts` | voluptuous (0.9) |
 
-**Dashverse — Dream it. Generate it. Share it.**
+**Male Body Type** (from muscle + facial hair + build):
+- `muscularmale` → muscular (0.9)
+- `pectorals` → muscular (0.6)
+- `abs` → athletic (0.7)
+- `bara` → muscular (0.9), bulky (0.7)
+- `dadbod` → average (0.6), chubby (0.4)
+- `skinnymale` → slim (0.8), skinny (0.9)
+
+**Confidence Resolution** (Competition Function):
+```python
+If multiple body type candidates (curvy, slim, muscular):
+  1. Filter by HIGHCONF threshold (0.1)
+  2. Sort by confidence descending
+  3. If top 2 differ by < DELTA (0.3): ambiguous, pick top
+  4. Else: clear winner
+```
+
+### 2.4 Multi-Modal Age Inference
+
+**Female Age** (order of priority):
+1. **Direct age tags** (2.0× weight): `teen`, `child`, `youngadult`, `middleaged`, `elderly`
+2. **Breast size anime heuristic**: `flatchest` → teen (0.4), `oppailoli` → child (0.8)
+3. **Clothing age hints**: `schooluniform` → teen (0.7), `businesssuit` → young adult (0.55)
+4. **Facial maturity tags**: `mature` → middle-aged (0.6), `milf` → middle-aged (0.7)
+5. **Height/proportion hints**: `tall` → young adult (0.3), `petite` → teen (0.3)
+
+**Male Age** (stronger facial hair signal):
+1. **Direct age tags** (2.0× weight)
+2. **Facial hair** (1.5× weight): `beard` → middle-aged (0.7), `whitebeard` → elderly (0.85)
+3. **Facial features**: `wrinkles` → middle-aged (0.7), `roundface` → teen (0.5)
+4. **Body build**: `muscular` → young adult (0.4), `dadbod` → middle-aged (0.7)
+5. **Clothing**: `gakuran` → teen (0.7), `salaryman` → middle-aged (0.75)
+
+### 2.5 Full Attribute Mapping
+
+**Production Quality** (reliable from tags):
+- Age ✅
+- Gender ✅
+- Hair Color ✅
+- Hair Length ✅
+- Hair Style ✅
+- Eye Color ✅
+- Dress (category + item list) ✅
+- Accessories ✅
+- Anime Origin ✅
+
+**Best-Effort** (tag inference limitations):
+- Body Type ⚠️
+- Skin Tone ⚠️
+- Expression ⚠️
+
+**Not Implemented**:
+- **Ethnicity**: ❌ Removed (unreliable from tags; requires labeled training data + CLIP fine-tuning)
+- **Scars/Tattoos**: ❌ Not extracted (requires object detection)
+
+### 2.6 Configuration Constants
+
+```python
+DELTA = 0.3                    # Confidence difference to break ties
+HIGHCONF = 0.1                 # Minimum confidence threshold
+EYEFALLBACKTHRESHOLD = 0.25    # Fallback for eye color
+
+MAXHAIRSTYLES = 2
+MAXACCESSORIES = 5
+MAXCLOTHINGITEMS = 5
+MAXEXPRESSIONS = 3
+
+CHARCOUNTREGEX = r'(\d+)(girl|girls|boy|boys)'
+MULTIKEYWORDS = ["multiple", "several", "group", "couple", "team"]
+```
+
+---
+
+## Single-Image Flow (v0.5.1 Demo)
+
+### Gradio UI Features
+- Image upload with preview
+- Multi-tagger selection (DeepDanbooru | CLIP | Both)
+- Tab-based output: Simple JSON | Full JSON | Table | Raw Tags
+- Performance metrics
+- Error handling
+
+### Example Output (Simple JSON)
+
+```json
+{
+  "Age": "Young Adult",
+  "Gender": "Female",
+  "Hair Style": "Ponytail",
+  "Hair Color": "Black",
+  "Hair Length": "Long",
+  "Eye Color": "Blue",
+  "Body Type": "Slim",
+  "Dress": "Casual"
+}
+```
+
+---
+
+## Batch Pipeline (v0.6.2 Scaling)
+
+### Overview
+
+**v0.6.2** extends v0.5.1 with:
+- ✅ HuggingFace dataset streaming
+- ✅ Batch processing for CLIP (16 images)
+- ✅ DeepDanbooru rate limiting (5 hits/sec)
+- ✅ JSONL streaming output
+- ✅ Metadata integration
+- ✅ Colab optimization
+
+### JSONL Output Schema
+
+```json
+{
+  "image_id": "abc123",
+  "version": "0.6.2",
+  "tagger": "DeepDanbooru",
+  "inference_time_sec": 0.18,
+  "attributes": { /* full projector output */ },
+  "metadata": {
+    "width": 1280,
+    "height": 720,
+    "metadata_tags": ["1girl", "solo", ...]
+  },
+  "raw_tags": {"1girl": 0.99, "solo": 0.97, ...},
+  "error": null
+}
+```
+
+### Performance Metrics
+
+| Metric | Value |
+|--------|-------|
+| **Images/sec (DeepDanbooru)** | 5 |
+| **Images/sec (CLIP)** | ~20 |
+| **Memory per shard** | ~2–4 GB |
+| **Processing time/shard** | 30–60 min (DD), 8–15 min (CLIP) |
+
+---
+
+## Scaling to 5M+ Images
+
+### Throughput Analysis
+
+**Single GPU**:
+| Tagger | Images/Sec | Total Time (5M) |
+|--------|-----------|---|
+| DeepDanbooru (API) | 5 | 290 hours (12 days) |
+| CLIP (batch=16) | 20 | 70 hours (3 days) |
+
+**Ray Distributed (4 GPU Workers)**:
+| Setup | Throughput | Total Time (5M) |
+|-------|---|---|
+| 4× DeepDanbooru | 20 img/sec | 70 hours |
+| 4× CLIP | 80 img/sec | 17.5 hours |
+
+### Ray Parallelization
+
+```python
+@ray.remote(num_gpus=1)
+def process_shard_remote(shard_idx, tagger_choice, output_dir):
+    shard_data = load_shard(shard_idx)
+    output_jsonl = Path(output_dir) / f"shard_{shard_idx}.jsonl"
+    successful, errors, _ = process_shard_batch(
+        shard_data, tagger_choice, output_jsonl_path=str(output_jsonl)
+    )
+    return {"shard": shard_idx, "successful": successful, "errors": errors}
+
+# Math: 4 workers × 30 shards each = 120 total
+# Speedup ≈ 4× vs single GPU
+```
+
+---
+
+## Colab-Free Constraints & Solutions
+
+| Constraint | Solution |
+|-----------|----------|
+| **Session Timeout** (12 hr) | ✅ Restart + resume with checkpoint |
+| **GPU Availability** (T4/K80) | ✅ Migrate to Colab Pro or local |
+| **RAM Cap** (12 GB) | ✅ Streaming + cache clearing |
+| **Disk Space** (100 GB) | ✅ JSONL streaming, save to Drive |
+| **GPU Memory** (15 GB) | ✅ Reduce batch_size (4 instead of 16) |
+
+### Implementation
+
+```python
+# Strategy 1: Resume-friendly pipeline
+def run_pipeline_with_resume(num_shards=120, resume_from_shard=0):
+    for shard_idx in range(resume_from_shard, num_shards):
+        # ... process ...
+        with open("checkpoint.json", 'w') as f:
+            json.dump({"last_shard": shard_idx}, f)
+
+# Strategy 2: Memory cleanup
+import gc
+del shard_data
+gc.collect()
+torch.cuda.empty_cache()
+
+# Strategy 3: Save to Google Drive
+from google.colab import drive
+drive.mount('/content/drive')
+output_dir = '/content/drive/My Drive/wtc_output'
+```
+
+---
+
+## Known Limitations & Future Work
+
+1. **Ethnicity Inference** ❌ (requires labeled dataset + CLIP fine-tuning)
+2. **Scars/Tattoos** ❌ (requires object detection)
+3. **Body Type Accuracy** ⚠️ (relies on breast/hip tags)
+4. **CLIP Latency** ⚠️ (200-500 ms; fine-tuning → 50 ms)
+
+---
+
+## Code Structure
+
+```
+WTCv0_5_1.ipynb
+├─ optimizedpaste.py (Projector)
+├─ cliptagger.py (CLIP)
+└─ app.py (Gradio UI)
+
+WTCv0_6_2.ipynb (adds)
+├─ pipeline_utils.py (Shard loading)
+├─ distributed.py (Ray)
+└─ run_pipeline_v062() (Orchestrator)
+```
+
+---
+
+## References
+
+- **Dataset**: [cagliostrolab/860k-ordered-tags](https://huggingface.co/datasets/cagliostrolab/860k-ordered-tags)
+- **DeepDanbooru**: HF Space `hysts/DeepDanbooru`
+- **CLIP**: `openai/clip-vit-large-patch14`
+
+---
+
+**Document Version**: 1.0  
+**Last Updated**: December 26, 2025, 1:35 PM IST  
